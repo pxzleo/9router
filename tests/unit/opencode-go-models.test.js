@@ -2,6 +2,9 @@ import { describe, expect, it } from "vitest";
 import { PROVIDER_MODELS, getModelSupportedFormats, getModelTargetFormat } from "../../open-sse/config/providerModels.js";
 import { PROVIDERS } from "../../open-sse/config/providers.js";
 import { resolveTransport } from "../../open-sse/services/provider.js";
+import { getCapabilitiesForModel } from "../../open-sse/providers/capabilities.js";
+import { stripUnsupportedModalities } from "../../open-sse/translator/concerns/modality.js";
+import { FORMATS } from "../../open-sse/translator/formats.js";
 
 // Chat-only models (no /messages, no /responses support on opencode-go)
 const CHAT_ONLY = ["glm-5.3", "glm-5.2", "glm-5.1", "kimi-k2.7-code", "kimi-k2.6", "kimi-k3",
@@ -34,6 +37,20 @@ describe("OpenCode Go model catalog", () => {
       "grok-4.6", "gpt-5.6-luna",
       "muse-spark-1.2-contributor", "muse-spark-1.3-contributor",
     ]);
+  });
+});
+
+describe("OpenCode Go Qwen3.8 image input", () => {
+  it.each(["qwen3.8-max", "qwen3.8-flash"])("keeps image blocks for %s", (model) => {
+    const caps = getCapabilitiesForModel("opencode-go", model);
+    expect(caps.vision).toBe(true);
+
+    const body = { messages: [{ role: "user", content: [
+      { type: "text", text: "What is in this image?" },
+      { type: "image_url", image_url: { url: "data:image/png;base64,AA==" } },
+    ] }] };
+    stripUnsupportedModalities(body, FORMATS.OPENAI, caps);
+    expect(body.messages[0].content[1].type).toBe("image_url");
   });
 });
 
