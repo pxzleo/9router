@@ -1,7 +1,20 @@
 import { describe, expect, it } from "vitest";
 import { getCapabilitiesForModel } from "../../open-sse/providers/capabilities.js";
+import { stripUnsupportedModalities } from "../../open-sse/translator/concerns/modality.js";
+import { FORMATS } from "../../open-sse/translator/formats.js";
 
 describe("getCapabilitiesForModel", () => {
+
+  it("keeps image input for the local ais/qwen3.8-27b model", () => {
+    const caps = getCapabilitiesForModel("openai-compatible-chat-local", "qwen3.8-27b");
+    expect(caps.vision).toBe(true);
+    const body = { messages: [{ role: "user", content: [
+      { type: "text", text: "Describe the image" },
+      { type: "image_url", image_url: { url: "data:image/png;base64,AA==" } },
+    ] }] };
+    stripUnsupportedModalities(body, FORMATS.OPENAI, caps);
+    expect(body.messages[0].content[1].type).toBe("image_url");
+  });
 
   it("reports DeepSeek V4.1-Flash ids as vision-capable without dropping their thinking/context", () => {
     const v41 = { vision: true, reasoning: true, thinkingFormat: "deepseek", contextWindow: 1000000, maxOutput: 384000 };
