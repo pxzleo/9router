@@ -279,6 +279,13 @@ export function createSSEStream(options = {}) {
           continue;
         }
 
+        // Responses API text lives in delta, not in choices[].delta.content.
+        if (targetFormat === FORMATS.OPENAI_RESPONSES &&
+            parsed.type === "response.output_text.delta" && typeof parsed.delta === "string") {
+          totalContentLength += parsed.delta.length;
+          accumulatedContent += parsed.delta;
+        }
+
         // Claude format - content
         if (parsed.delta?.text) {
           totalContentLength += parsed.delta.text.length;
