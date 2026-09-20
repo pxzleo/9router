@@ -22,13 +22,14 @@ beforeAll(async () => {
   vi.resetModules();
   db = await import("@/lib/db/index.js");
   await db.initDb();
-  await db.updateSettings({ enableObservability2: true, observabilityBatchSize: 1 });
+  await db.updateSettings({ enableObservability: true, observabilityBatchSize: 1 });
 
   const { getAdapter } = await import("@/lib/db/driver.js");
   adapter = await getAdapter();
 });
 
 afterAll(() => {
+  adapter?.close();
   if (tempDir) fs.rmSync(tempDir, { recursive: true, force: true });
   if (originalDataDir === undefined) delete process.env.DATA_DIR;
   else process.env.DATA_DIR = originalDataDir;
@@ -54,6 +55,21 @@ describe("request details — tab crash-risk cases", () => {
     expect(res.pagination.page).toBe(9999);
     expect(res.pagination.hasNext).toBe(false);
     expect(res.pagination.totalItems).toBeGreaterThanOrEqual(0);
+  });
+
+  it("stores API key identity without storing the secret and filters by key ID", async () => {
+    adapter.run(
+      `INSERT INTO apiKeys(id, key, name, machineId, isActive, createdAt) VALUES(?, ?, ?, ?, ?, ?)`,
+      ["client-a", "test-secret-a", "Client A", "test-machine", 1, new Date().toISOString()]
+    );
+    await saveDetail({ id: "client-a-detail", provider: "codex", model: "test-model", apiKey: "test-secret-a" });
+    await saveDetail({ id: "no-key-detail", provider: "codex", model: "test-model" });
+
+    const result = await db.getRequestDetails({ apiKeyId: "client-a" });
+    expect(result.details.map((detail) => detail.id)).toEqual(["client-a-detail"]);
+    expect(result.details[0]).toMatchObject({ apiKeyId: "client-a", apiKeyName: "Client A" });
+    expect(JSON.stringify(result.details[0])).not.toContain("test-secret-a");
+    expect(result.apiKeys).toContainEqual({ id: "client-a", name: "Client A" });
   });
 
   it("invalid startDate → Invalid Date ISO throws inside getRequestDetails is caught upstream", async () => {

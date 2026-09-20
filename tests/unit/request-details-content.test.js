@@ -25,4 +25,11 @@ describe("request details API", () => {
     expect(body.details).toEqual([detail]);
     expect(body.pagination.totalItems).toBe(1);
   });
+
+  it("passes the API key ID filter through to the details query", async () => {
+    getRequestDetails.mockResolvedValue({ details: [], apiKeys: [], pagination: { page: 1, pageSize: 20, totalItems: 0 } });
+    const response = await GET(new Request("http://localhost/api/usage/request-details?apiKeyId=client-a"));
+    expect(response.status).toBe(200);
+    expect(getRequestDetails).toHaveBeenCalledWith(expect.objectContaining({ apiKeyId: "client-a" }));
+  });
 });

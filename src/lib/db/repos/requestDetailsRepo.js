@@ -101,12 +101,17 @@ async function flushToDatabase() {
           if (!item.id) item.id = generateDetailId(item.model);
           if (!item.timestamp) item.timestamp = new Date().toISOString();
           if (item.request?.headers) item.request.headers = sanitizeHeaders(item.request.headers);
+          const key = item.apiKey
+            ? db.get(`SELECT id, name FROM apiKeys WHERE key = ?`, [item.apiKey])
+            : null;
 
           const record = {
             id: item.id,
             provider: item.provider || null,
             model: item.model || null,
             connectionId: item.connectionId || null,
+            apiKeyId: key?.id || null,
+            apiKeyName: key?.name || (item.apiKey ? "Unknown API Key" : "Local (No API Key)"),
             timestamp: item.timestamp,
             status: item.status || null,
             latency: item.latency || {},
@@ -167,6 +172,7 @@ export async function getRequestDetails(filter = {}) {
   if (filter.provider) { conds.push("provider = ?"); params.push(filter.provider); }
   if (filter.model) { conds.push("model = ?"); params.push(filter.model); }
   if (filter.connectionId) { conds.push("connectionId = ?"); params.push(filter.connectionId); }
+  if (filter.apiKeyId) { conds.push("CASE WHEN json_valid(data) THEN json_extract(data, '$.apiKeyId') END = ?"); params.push(filter.apiKeyId); }
   if (filter.status) { conds.push("status = ?"); params.push(filter.status); }
   if (filter.startDate) { conds.push("timestamp >= ?"); params.push(new Date(filter.startDate).toISOString()); }
   if (filter.endDate) { conds.push("timestamp <= ?"); params.push(new Date(filter.endDate).toISOString()); }
@@ -185,9 +191,18 @@ export async function getRequestDetails(filter = {}) {
     [...params, pageSize, offset]
   );
   const details = rows.map((r) => parseJson(r.data, {}));
+  const recordedKeys = db.all(
+    `SELECT json_extract(data, '$.apiKeyId') AS id, MAX(json_extract(data, '$.apiKeyName')) AS name
+     FROM requestDetails WHERE json_valid(data) AND json_extract(data, '$.apiKeyId') IS NOT NULL GROUP BY id ORDER BY name`
+  );
+  const apiKeys = [...new Map([
+    ...recordedKeys.map((key) => [key.id, key]),
+    ...db.all(`SELECT id, name FROM apiKeys ORDER BY name`).map((key) => [key.id, key]),
+  ]).values()].sort((a, b) => a.name.localeCompare(b.name));
 
   return {
     details,
+    apiKeys,
     pagination: { page, pageSize, totalItems, totalPages, hasNext: page < totalPages, hasPrev: page > 1 },
   };
 }
