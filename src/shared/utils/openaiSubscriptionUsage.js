@@ -50,7 +50,7 @@ export function calculateOpenAISubscriptionUsage(model, tokens, tierValue) {
 
 export function addOpenAISubscriptionUsage(dataMap, tierValue) {
   return Object.fromEntries(Object.entries(dataMap || {}).map(([key, data]) => {
-    if (data.providerId !== "codex") {
+    if (!tierValue || data.providerId !== "codex") {
       return [key, { ...data, subscriptionPercent: null }];
     }
     const usage = calculateOpenAISubscriptionUsage(data.rawModel, data, tierValue);

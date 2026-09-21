@@ -231,7 +231,7 @@ export default function UsageStats({ period: periodProp, setPeriod: setPeriodPro
   const [viewMode, setViewMode] = useState("costs");
   const [providers, setProviders] = useState([]);
   const [periodLocal, setPeriodLocal] = useState("today");
-  const [openaiSubscriptionTier, setOpenaiSubscriptionTier] = useState("plus");
+  const [openaiSubscriptionTier, setOpenaiSubscriptionTier] = useState(null);
   const [tierSaving, setTierSaving] = useState(false);
   const [tierError, setTierError] = useState("");
   const isInitialLoad = useRef(true);
@@ -248,6 +248,7 @@ export default function UsageStats({ period: periodProp, setPeriod: setPeriodPro
       .then((settings) => setOpenaiSubscriptionTier(settings.openaiSubscriptionTier || "plus"))
       .catch((error) => {
         console.error("[UsageStats] Failed to load OpenAI subscription tier:", error);
+        setOpenaiSubscriptionTier("plus");
         setTierError("Failed to load subscription tier.");
       });
   }, []);
@@ -572,7 +573,7 @@ export default function UsageStats({ period: periodProp, setPeriod: setPeriodPro
               <div className="flex items-center gap-2">
                 <span className="text-xs text-text-muted whitespace-nowrap">OpenAI plan</span>
                 <select
-                  value={openaiSubscriptionTier}
+                  value={openaiSubscriptionTier || "plus"}
                   onChange={(event) => updateOpenaiSubscriptionTier(event.target.value)}
                   disabled={tierSaving}
                   title="Estimate from the selected period's tokens and OpenAI credit rates; your official usage page may differ"

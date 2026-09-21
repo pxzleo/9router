@@ -61,4 +61,16 @@ describe("OpenAI subscription usage", () => {
     expect(rows.codex.subscriptionPercent).toBeCloseTo(0.9438, 3);
     expect(rows.local.subscriptionPercent).toBeNull();
   });
+
+  it("waits for the configured tier before showing a percentage", () => {
+    const rows = addOpenAISubscriptionUsage({
+      codex: {
+        providerId: "codex",
+        rawModel: "gpt-5.6-sol",
+        promptTokens: 1_000_000,
+      },
+    }, null);
+
+    expect(rows.codex.subscriptionPercent).toBeNull();
+  });
 });
