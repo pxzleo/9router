@@ -575,7 +575,7 @@ export default function UsageStats({ period: periodProp, setPeriod: setPeriodPro
                   value={openaiSubscriptionTier}
                   onChange={(event) => updateOpenaiSubscriptionTier(event.target.value)}
                   disabled={tierSaving}
-                  title="Estimate from rolling 7-day tokens and OpenAI credit rates; your official usage page may differ"
+                  title="Estimate from the selected period's tokens and OpenAI credit rates; your official usage page may differ"
                   className="rounded-lg border border-border bg-surface px-3 py-1.5 text-sm font-medium text-text-main focus:outline-none focus:ring-2 focus:ring-primary/50"
                 >
                   {OPENAI_SUBSCRIPTION_TIERS.map((tier) => (
