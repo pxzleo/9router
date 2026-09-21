@@ -5,7 +5,7 @@ import { useSearchParams, useRouter } from "next/navigation";
 import { FREE_PROVIDERS, AI_PROVIDERS } from "@/shared/constants/providers";
 import {
   OPENAI_SUBSCRIPTION_TIERS,
-  calculateOpenAISubscriptionUsage,
+  addOpenAISubscriptionUsage,
 } from "@/shared/utils/openaiSubscriptionUsage";
 
 // Keep providers without serviceKinds (default LLM) or with "llm" in serviceKinds
@@ -164,15 +164,16 @@ function groupDataByKey(data, keyField) {
 const MODEL_COLUMNS = [
   { field: "rawModel", label: "Model" },
   { field: "provider", label: "Provider" },
-  { field: "subscriptionPercent", label: "Est. 7D Subscription", align: "right" },
+  { field: "subscriptionPercent", label: "周订阅消耗", align: "right" },
   { field: "requests", label: "Requests", align: "right" },
   { field: "lastUsed", label: "Last Used", align: "right" },
 ];
 
 const ACCOUNT_COLUMNS = [
+  { field: "accountName", label: "Account" },
   { field: "rawModel", label: "Model" },
   { field: "provider", label: "Provider" },
-  { field: "accountName", label: "Account" },
+  { field: "subscriptionPercent", label: "周订阅消耗", align: "right" },
   { field: "requests", label: "Requests", align: "right" },
   { field: "lastUsed", label: "Last Used", align: "right" },
 ];
@@ -181,6 +182,7 @@ const API_KEY_COLUMNS = [
   { field: "keyName", label: "API Key Name" },
   { field: "rawModel", label: "Model" },
   { field: "provider", label: "Provider" },
+  { field: "subscriptionPercent", label: "周订阅消耗", align: "right" },
   { field: "requests", label: "Requests", align: "right" },
   { field: "lastUsed", label: "Last Used", align: "right" },
 ];
@@ -189,6 +191,7 @@ const ENDPOINT_COLUMNS = [
   { field: "endpoint", label: "Endpoint" },
   { field: "rawModel", label: "Model" },
   { field: "provider", label: "Provider" },
+  { field: "subscriptionPercent", label: "周订阅消耗", align: "right" },
   { field: "requests", label: "Requests", align: "right" },
   { field: "lastUsed", label: "Last Used", align: "right" },
 ];
@@ -212,34 +215,6 @@ function formatSubscriptionPercent(value) {
   if (typeof value !== "number") return "—";
   if (value > 0 && value < 0.01) return "<0.01%";
   return `${value.toFixed(2)}%`;
-}
-
-function addOpenAISubscriptionUsage(dataMap, usage7d, tier) {
-  const merged = { ...(dataMap || {}) };
-  for (const model of Object.keys(usage7d || {})) {
-    const exists = Object.values(merged).some((data) => data.providerId === "codex" && data.rawModel === model);
-    if (!exists) {
-      merged[`${model} (codex)`] = {
-        requests: 0,
-        promptTokens: 0,
-        completionTokens: 0,
-        cachedTokens: 0,
-        cost: 0,
-        rawModel: model,
-        provider: "codex",
-        providerId: "codex",
-        lastUsed: null,
-      };
-    }
-  }
-
-  return Object.fromEntries(Object.entries(merged).map(([key, data]) => {
-    if (data.providerId !== "codex") return [key, { ...data, subscriptionPercent: null }];
-    const usage = calculateOpenAISubscriptionUsage(data.rawModel, usage7d?.[data.rawModel], tier);
-    return [key, usage
-      ? { ...data, subscriptionPercent: usage.percent, subscriptionCredits: usage.credits }
-      : { ...data, subscriptionPercent: null }];
-  }));
 }
 
 export default function UsageStats({ period: periodProp, setPeriod: setPeriodProp, hidePeriodSelector = false } = {}) {
@@ -332,6 +307,9 @@ export default function UsageStats({ period: periodProp, setPeriod: setPeriodPro
 
   // Fetch filtered stats via REST when period changes
   useEffect(() => {
+    const controller = new AbortController();
+    let active = true;
+
     // First load: show full spinner; subsequent: show subtle fetching indicator
     if (isInitialLoad.current) {
       isInitialLoad.current = false;
@@ -340,40 +318,38 @@ export default function UsageStats({ period: periodProp, setPeriod: setPeriodPro
       setFetching(true);
     }
 
-    fetch(`/api/usage/stats?period=${period}`)
+    fetch(`/api/usage/stats?period=${period}`, { signal: controller.signal })
       .then((r) => r.ok ? r.json() : null)
       .then((data) => {
-        if (data) {
+        if (active && data) {
           hasLoadedStats.current = true;
           setStats((prev) => ({ ...prev, ...data }));
         }
       })
-      .catch(() => {})
+      .catch((error) => {
+        if (error.name !== "AbortError") console.error("[USAGE STATS] fetch error:", error);
+      })
       .finally(() => {
-        setLoading(false);
-        setFetching(false);
+        if (active) {
+          setLoading(false);
+          setFetching(false);
+        }
       });
+
+    return () => {
+      active = false;
+      controller.abort();
+    };
   }, [period]);
 
-  // SSE connection - real-time updates for activeRequests + recentRequests only
+  // SSE connection - keep the selected period current as new requests finish
   useEffect(() => {
-    const es = new EventSource("/api/usage/stream");
+    const es = new EventSource(`/api/usage/stream?period=${encodeURIComponent(period)}`);
 
     es.onmessage = (e) => {
       try {
         const data = JSON.parse(e.data);
-        // Always merge only real-time fields, never overwrite full stats from REST
-        setStats((prev) => {
-          if (!prev) return prev;
-          return {
-            ...prev,
-            activeRequests: data.activeRequests,
-            recentRequests: data.recentRequests,
-            errorProvider: data.errorProvider,
-            pending: data.pending,
-            openaiSubscription7d: data.openaiSubscription7d || prev.openaiSubscription7d,
-          };
-        });
+        setStats((prev) => ({ ...prev, ...data }));
         if (hasLoadedStats.current) setLoading(false);
       } catch (err) {
         console.error("[SSE CLIENT] parse error:", err);
@@ -383,7 +359,7 @@ export default function UsageStats({ period: periodProp, setPeriod: setPeriodPro
     es.onerror = () => setLoading(false);
 
     return () => es.close();
-  }, []);
+  }, [period]);
 
   const toggleSort = useCallback((tableType, field) => {
     const params = new URLSearchParams(searchParams.toString());
@@ -404,7 +380,6 @@ export default function UsageStats({ period: periodProp, setPeriod: setPeriodPro
         const pendingMap = stats.pending?.byModel || {};
         const modelsWithSubscription = addOpenAISubscriptionUsage(
           stats.byModel,
-          stats.openaiSubscription7d,
           openaiSubscriptionTier,
         );
         return {
@@ -442,15 +417,17 @@ export default function UsageStats({ period: periodProp, setPeriod: setPeriodPro
             }
           });
         }
+        const accountsWithSubscription = addOpenAISubscriptionUsage(stats.byAccount, openaiSubscriptionTier);
         return {
           columns: ACCOUNT_COLUMNS,
-          groupedData: groupDataByKey(sortData(stats.byAccount, pendingMap, sortBy, sortOrder), "accountName"),
+          groupedData: groupDataByKey(sortData(accountsWithSubscription, pendingMap, sortBy, sortOrder), "accountName"),
           storageKey: "usage-stats:expanded-accounts",
           emptyMessage: "No account-specific usage recorded yet.",
           renderSummaryCells: (group) => (
             <>
               <td className="px-6 py-3 text-text-muted">—</td>
               <td className="px-6 py-3 text-text-muted">—</td>
+              <td className="px-6 py-3 text-right font-medium">{formatSubscriptionPercent(group.summary.subscriptionPercent)}</td>
               <td className="px-6 py-3 text-right">{fmt(group.summary.requests)}</td>
               <td className="px-6 py-3 text-right text-text-muted whitespace-nowrap">{fmtTime(group.summary.lastUsed)}</td>
             </>
@@ -460,6 +437,7 @@ export default function UsageStats({ period: periodProp, setPeriod: setPeriodPro
               <td className={`px-6 py-3 font-medium transition-colors ${item.pending > 0 ? "text-primary" : ""}`}>{item.accountName || `Account ${item.connectionId?.slice(0, 8)}...`}</td>
               <td className={`px-6 py-3 font-medium transition-colors ${item.pending > 0 ? "text-primary" : ""}`}>{item.rawModel}</td>
               <td className="px-6 py-3"><Badge variant={item.pending > 0 ? "primary" : "neutral"} size="sm">{item.provider}</Badge></td>
+              <td className="px-6 py-3 text-right font-medium">{formatSubscriptionPercent(item.subscriptionPercent)}</td>
               <td className="px-6 py-3 text-right">{fmt(item.requests)}</td>
               <td className="px-6 py-3 text-right text-text-muted whitespace-nowrap">{fmtTime(item.lastUsed)}</td>
             </>
@@ -467,15 +445,17 @@ export default function UsageStats({ period: periodProp, setPeriod: setPeriodPro
         };
       }
       case "apiKey": {
+        const apiKeysWithSubscription = addOpenAISubscriptionUsage(stats.byApiKey, openaiSubscriptionTier);
         return {
           columns: API_KEY_COLUMNS,
-          groupedData: groupDataByKey(sortData(stats.byApiKey, {}, sortBy, sortOrder), "keyName"),
+          groupedData: groupDataByKey(sortData(apiKeysWithSubscription, {}, sortBy, sortOrder), "keyName"),
           storageKey: "usage-stats:expanded-apikeys",
           emptyMessage: "No API key usage recorded yet.",
           renderSummaryCells: (group) => (
             <>
               <td className="px-6 py-3 text-text-muted">—</td>
               <td className="px-6 py-3 text-text-muted">—</td>
+              <td className="px-6 py-3 text-right font-medium">{formatSubscriptionPercent(group.summary.subscriptionPercent)}</td>
               <td className="px-6 py-3 text-right">{fmt(group.summary.requests)}</td>
               <td className="px-6 py-3 text-right text-text-muted whitespace-nowrap">{fmtTime(group.summary.lastUsed)}</td>
             </>
@@ -485,6 +465,7 @@ export default function UsageStats({ period: periodProp, setPeriod: setPeriodPro
               <td className="px-6 py-3 font-medium">{item.keyName}</td>
               <td className="px-6 py-3">{item.rawModel}</td>
               <td className="px-6 py-3"><Badge variant="neutral" size="sm">{item.provider}</Badge></td>
+              <td className="px-6 py-3 text-right font-medium">{formatSubscriptionPercent(item.subscriptionPercent)}</td>
               <td className="px-6 py-3 text-right">{fmt(item.requests)}</td>
               <td className="px-6 py-3 text-right text-text-muted whitespace-nowrap">{fmtTime(item.lastUsed)}</td>
             </>
@@ -493,15 +474,17 @@ export default function UsageStats({ period: periodProp, setPeriod: setPeriodPro
       }
       case "endpoint":
       default: {
+        const endpointsWithSubscription = addOpenAISubscriptionUsage(stats.byEndpoint, openaiSubscriptionTier);
         return {
           columns: ENDPOINT_COLUMNS,
-          groupedData: groupDataByKey(sortData(stats.byEndpoint, {}, sortBy, sortOrder), "endpoint"),
+          groupedData: groupDataByKey(sortData(endpointsWithSubscription, {}, sortBy, sortOrder), "endpoint"),
           storageKey: "usage-stats:expanded-endpoints",
           emptyMessage: "No endpoint usage recorded yet.",
           renderSummaryCells: (group) => (
             <>
               <td className="px-6 py-3 text-text-muted">—</td>
               <td className="px-6 py-3 text-text-muted">—</td>
+              <td className="px-6 py-3 text-right font-medium">{formatSubscriptionPercent(group.summary.subscriptionPercent)}</td>
               <td className="px-6 py-3 text-right">{fmt(group.summary.requests)}</td>
               <td className="px-6 py-3 text-right text-text-muted whitespace-nowrap">{fmtTime(group.summary.lastUsed)}</td>
             </>
@@ -511,6 +494,7 @@ export default function UsageStats({ period: periodProp, setPeriod: setPeriodPro
               <td className="px-6 py-3 font-medium font-mono text-sm">{item.endpoint}</td>
               <td className="px-6 py-3">{item.rawModel}</td>
               <td className="px-6 py-3"><Badge variant="neutral" size="sm">{item.provider}</Badge></td>
+              <td className="px-6 py-3 text-right font-medium">{formatSubscriptionPercent(item.subscriptionPercent)}</td>
               <td className="px-6 py-3 text-right">{fmt(item.requests)}</td>
               <td className="px-6 py-3 text-right text-text-muted whitespace-nowrap">{fmtTime(item.lastUsed)}</td>
             </>

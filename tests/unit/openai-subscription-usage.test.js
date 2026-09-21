@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  addOpenAISubscriptionUsage,
   calculateOpenAISubscriptionUsage,
   getOpenAISubscriptionTier,
 } from "../../src/shared/utils/openaiSubscriptionUsage.js";
@@ -38,5 +39,26 @@ describe("OpenAI subscription usage", () => {
 
   it("does not estimate models missing from the official rate card", () => {
     expect(calculateOpenAISubscriptionUsage("gpt-5.3-codex-spark", {}, "plus")).toBeNull();
+  });
+
+  it("calculates each statistics row from that row's selected-period tokens", () => {
+    const rows = addOpenAISubscriptionUsage({
+      codex: {
+        providerId: "codex",
+        rawModel: "gpt-5.6-sol",
+        promptTokens: 4_373_299,
+        cachedTokens: 3_996_416,
+        completionTokens: 33_445,
+      },
+      local: {
+        providerId: "openai-compatible-chat-local",
+        rawModel: "qwen3.8-27b",
+        promptTokens: 9_000_000,
+        completionTokens: 1_000_000,
+      },
+    }, "pro20x");
+
+    expect(rows.codex.subscriptionPercent).toBeCloseTo(0.9438, 3);
+    expect(rows.local.subscriptionPercent).toBeNull();
   });
 });

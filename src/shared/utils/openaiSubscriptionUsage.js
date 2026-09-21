@@ -47,3 +47,15 @@ export function calculateOpenAISubscriptionUsage(model, tokens, tierValue) {
     percent: tier.estimatedWeeklyCredits > 0 ? credits / tier.estimatedWeeklyCredits * 100 : 0,
   };
 }
+
+export function addOpenAISubscriptionUsage(dataMap, tierValue) {
+  return Object.fromEntries(Object.entries(dataMap || {}).map(([key, data]) => {
+    if (data.providerId !== "codex") {
+      return [key, { ...data, subscriptionPercent: null }];
+    }
+    const usage = calculateOpenAISubscriptionUsage(data.rawModel, data, tierValue);
+    return [key, usage
+      ? { ...data, subscriptionPercent: usage.percent, subscriptionCredits: usage.credits }
+      : { ...data, subscriptionPercent: null }];
+  }));
+}
