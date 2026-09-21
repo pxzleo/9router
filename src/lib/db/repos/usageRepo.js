@@ -401,7 +401,43 @@ export async function getUsageStats(period = "all") {
     activeRequests: [],
     recentRequests,
     errorProvider: (Date.now() - lastErrorProvider.ts < 10000) ? lastErrorProvider.provider : "",
+    openaiSubscription7d: {},
   };
+
+  // Subscription usage is a rolling seven-day view, independent of the table period.
+  const subscriptionCutoff = new Date(Date.now() - 7 * 86400000).toISOString();
+  const openaiRows = db.all(
+    `SELECT
+       model,
+       SUM(COALESCE(
+         CASE WHEN json_valid(tokens) THEN json_extract(tokens, '$.prompt_tokens') END,
+         CASE WHEN json_valid(tokens) THEN json_extract(tokens, '$.input_tokens') END,
+         promptTokens,
+         0
+       )) AS promptTokens,
+       SUM(COALESCE(
+         CASE WHEN json_valid(tokens) THEN json_extract(tokens, '$.completion_tokens') END,
+         CASE WHEN json_valid(tokens) THEN json_extract(tokens, '$.output_tokens') END,
+         completionTokens,
+         0
+       )) AS completionTokens,
+       SUM(COALESCE(
+         CASE WHEN json_valid(tokens) THEN json_extract(tokens, '$.cached_tokens') END,
+         CASE WHEN json_valid(tokens) THEN json_extract(tokens, '$.cache_read_input_tokens') END,
+         0
+       )) AS cachedTokens
+     FROM usageHistory
+     WHERE provider = ? AND timestamp >= ?
+     GROUP BY model`,
+    ["codex", subscriptionCutoff]
+  );
+  for (const row of openaiRows) {
+    stats.openaiSubscription7d[row.model] = {
+      promptTokens: row.promptTokens || 0,
+      completionTokens: row.completionTokens || 0,
+      cachedTokens: row.cachedTokens || 0,
+    };
+  }
 
   // Active requests
   for (const [connectionId, models] of Object.entries(pendingRequests.byAccount)) {
@@ -473,7 +509,7 @@ export async function getUsageStats(period = "all") {
         const statsKey = provider ? `${rawModel} (${provider})` : rawModel;
         const providerDisplayName = providerNodeNameMap[provider] || provider;
         if (!stats.byModel[statsKey]) {
-          stats.byModel[statsKey] = { requests: 0, promptTokens: 0, completionTokens: 0, cachedTokens: 0, cost: 0, rawModel, provider: providerDisplayName, lastUsed: dateKey };
+          stats.byModel[statsKey] = { requests: 0, promptTokens: 0, completionTokens: 0, cachedTokens: 0, cost: 0, rawModel, provider: providerDisplayName, providerId: provider, lastUsed: dateKey };
         }
         stats.byModel[statsKey].requests += m.requests || 0;
         stats.byModel[statsKey].promptTokens += m.promptTokens || 0;
@@ -600,7 +636,7 @@ export async function getUsageStats(period = "all") {
 
       const modelKey = r.provider ? `${r.model} (${r.provider})` : r.model;
       if (!stats.byModel[modelKey]) {
-        stats.byModel[modelKey] = { requests: 0, promptTokens: 0, completionTokens: 0, cachedTokens: 0, cost: 0, rawModel: r.model, provider: providerDisplayName, lastUsed: r.timestamp };
+        stats.byModel[modelKey] = { requests: 0, promptTokens: 0, completionTokens: 0, cachedTokens: 0, cost: 0, rawModel: r.model, provider: providerDisplayName, providerId: r.provider, lastUsed: r.timestamp };
       }
       stats.byModel[modelKey].requests++;
       stats.byModel[modelKey].promptTokens += promptTokens;

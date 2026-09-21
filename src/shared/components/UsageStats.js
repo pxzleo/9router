@@ -3,6 +3,10 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
 import { FREE_PROVIDERS, AI_PROVIDERS } from "@/shared/constants/providers";
+import {
+  OPENAI_SUBSCRIPTION_TIERS,
+  calculateOpenAISubscriptionUsage,
+} from "@/shared/utils/openaiSubscriptionUsage";
 
 // Keep providers without serviceKinds (default LLM) or with "llm" in serviceKinds
 function isLLMProvider(id) {
@@ -131,7 +135,7 @@ function groupDataByKey(data, keyField) {
     if (!groups[gk]) {
       groups[gk] = {
         groupKey: gk,
-        summary: { requests: 0, promptTokens: 0, completionTokens: 0, cachedTokens: 0, totalTokens: 0, cost: 0, inputCost: 0, cachedCost: 0, outputCost: 0, lastUsed: null, pending: 0 },
+        summary: { requests: 0, promptTokens: 0, completionTokens: 0, cachedTokens: 0, totalTokens: 0, cost: 0, inputCost: 0, cachedCost: 0, outputCost: 0, lastUsed: null, pending: 0, subscriptionPercent: null },
         items: [],
       };
     }
@@ -146,6 +150,9 @@ function groupDataByKey(data, keyField) {
     s.cachedCost += item.cachedCost || 0;
     s.outputCost += item.outputCost || 0;
     s.pending += item.pending || 0;
+    if (typeof item.subscriptionPercent === "number") {
+      s.subscriptionPercent = (s.subscriptionPercent || 0) + item.subscriptionPercent;
+    }
     if (item.lastUsed && (!s.lastUsed || new Date(item.lastUsed) > new Date(s.lastUsed))) {
       s.lastUsed = item.lastUsed;
     }
@@ -157,6 +164,7 @@ function groupDataByKey(data, keyField) {
 const MODEL_COLUMNS = [
   { field: "rawModel", label: "Model" },
   { field: "provider", label: "Provider" },
+  { field: "subscriptionPercent", label: "Est. 7D Subscription", align: "right" },
   { field: "requests", label: "Requests", align: "right" },
   { field: "lastUsed", label: "Last Used", align: "right" },
 ];
@@ -200,6 +208,40 @@ const PERIODS = [
   { value: "60d", label: "60D" },
 ];
 
+function formatSubscriptionPercent(value) {
+  if (typeof value !== "number") return "—";
+  if (value > 0 && value < 0.01) return "<0.01%";
+  return `${value.toFixed(2)}%`;
+}
+
+function addOpenAISubscriptionUsage(dataMap, usage7d, tier) {
+  const merged = { ...(dataMap || {}) };
+  for (const model of Object.keys(usage7d || {})) {
+    const exists = Object.values(merged).some((data) => data.providerId === "codex" && data.rawModel === model);
+    if (!exists) {
+      merged[`${model} (codex)`] = {
+        requests: 0,
+        promptTokens: 0,
+        completionTokens: 0,
+        cachedTokens: 0,
+        cost: 0,
+        rawModel: model,
+        provider: "codex",
+        providerId: "codex",
+        lastUsed: null,
+      };
+    }
+  }
+
+  return Object.fromEntries(Object.entries(merged).map(([key, data]) => {
+    if (data.providerId !== "codex") return [key, { ...data, subscriptionPercent: null }];
+    const usage = calculateOpenAISubscriptionUsage(data.rawModel, usage7d?.[data.rawModel], tier);
+    return [key, usage
+      ? { ...data, subscriptionPercent: usage.percent, subscriptionCredits: usage.credits }
+      : { ...data, subscriptionPercent: null }];
+  }));
+}
+
 export default function UsageStats({ period: periodProp, setPeriod: setPeriodProp, hidePeriodSelector = false } = {}) {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -214,10 +256,47 @@ export default function UsageStats({ period: periodProp, setPeriod: setPeriodPro
   const [viewMode, setViewMode] = useState("costs");
   const [providers, setProviders] = useState([]);
   const [periodLocal, setPeriodLocal] = useState("today");
+  const [openaiSubscriptionTier, setOpenaiSubscriptionTier] = useState("plus");
+  const [tierSaving, setTierSaving] = useState(false);
+  const [tierError, setTierError] = useState("");
   const isInitialLoad = useRef(true);
   const hasLoadedStats = useRef(false);
   const period = periodProp ?? periodLocal;
   const setPeriod = setPeriodProp ?? setPeriodLocal;
+
+  useEffect(() => {
+    fetch("/api/settings")
+      .then((response) => {
+        if (!response.ok) throw new Error(`Settings request failed (${response.status})`);
+        return response.json();
+      })
+      .then((settings) => setOpenaiSubscriptionTier(settings.openaiSubscriptionTier || "plus"))
+      .catch((error) => {
+        console.error("[UsageStats] Failed to load OpenAI subscription tier:", error);
+        setTierError("Failed to load subscription tier.");
+      });
+  }, []);
+
+  const updateOpenaiSubscriptionTier = useCallback(async (nextTier) => {
+    const previousTier = openaiSubscriptionTier;
+    setOpenaiSubscriptionTier(nextTier);
+    setTierSaving(true);
+    setTierError("");
+    try {
+      const response = await fetch("/api/settings", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ openaiSubscriptionTier: nextTier }),
+      });
+      if (!response.ok) throw new Error(`Settings update failed (${response.status})`);
+    } catch (error) {
+      console.error("[UsageStats] Failed to save OpenAI subscription tier:", error);
+      setOpenaiSubscriptionTier(previousTier);
+      setTierError("Failed to save subscription tier.");
+    } finally {
+      setTierSaving(false);
+    }
+  }, [openaiSubscriptionTier]);
 
   // Fetch connected providers once, deduplicate by provider type
   // Always include noAuth free providers (e.g. opencode) regardless of connections
@@ -292,6 +371,7 @@ export default function UsageStats({ period: periodProp, setPeriod: setPeriodPro
             recentRequests: data.recentRequests,
             errorProvider: data.errorProvider,
             pending: data.pending,
+            openaiSubscription7d: data.openaiSubscription7d || prev.openaiSubscription7d,
           };
         });
         if (hasLoadedStats.current) setLoading(false);
@@ -322,14 +402,20 @@ export default function UsageStats({ period: periodProp, setPeriod: setPeriodPro
     switch (tableView) {
       case "model": {
         const pendingMap = stats.pending?.byModel || {};
+        const modelsWithSubscription = addOpenAISubscriptionUsage(
+          stats.byModel,
+          stats.openaiSubscription7d,
+          openaiSubscriptionTier,
+        );
         return {
           columns: MODEL_COLUMNS,
-          groupedData: groupDataByKey(sortData(stats.byModel, pendingMap, sortBy, sortOrder), "rawModel"),
+          groupedData: groupDataByKey(sortData(modelsWithSubscription, pendingMap, sortBy, sortOrder), "rawModel"),
           storageKey: "usage-stats:expanded-models",
           emptyMessage: "No usage recorded yet.",
           renderSummaryCells: (group) => (
             <>
               <td className="px-6 py-3 text-text-muted">—</td>
+              <td className="px-6 py-3 text-right font-medium">{formatSubscriptionPercent(group.summary.subscriptionPercent)}</td>
               <td className="px-6 py-3 text-right">{fmt(group.summary.requests)}</td>
               <td className="px-6 py-3 text-right text-text-muted whitespace-nowrap">{fmtTime(group.summary.lastUsed)}</td>
             </>
@@ -338,6 +424,7 @@ export default function UsageStats({ period: periodProp, setPeriod: setPeriodPro
             <>
               <td className={`px-6 py-3 font-medium transition-colors ${item.pending > 0 ? "text-primary" : ""}`}>{item.rawModel}</td>
               <td className="px-6 py-3"><Badge variant={item.pending > 0 ? "primary" : "neutral"} size="sm">{item.provider}</Badge></td>
+              <td className="px-6 py-3 text-right font-medium">{formatSubscriptionPercent(item.subscriptionPercent)}</td>
               <td className="px-6 py-3 text-right">{fmt(item.requests)}</td>
               <td className="px-6 py-3 text-right text-text-muted whitespace-nowrap">{fmtTime(item.lastUsed)}</td>
             </>
@@ -431,7 +518,7 @@ export default function UsageStats({ period: periodProp, setPeriod: setPeriodPro
         };
       }
     }
-  }, [stats, tableView, sortBy, sortOrder]);
+  }, [stats, tableView, sortBy, sortOrder, openaiSubscriptionTier]);
 
   if (!stats && !loading) return <div className="text-text-muted">Failed to load usage statistics.</div>;
 
@@ -496,7 +583,25 @@ export default function UsageStats({ period: periodProp, setPeriod: setPeriodPro
               <option key={opt.value} value={opt.value}>{opt.label}</option>
             ))}
           </select>
-          <div className="grid grid-cols-2 items-center gap-1 rounded-lg border border-border bg-bg-subtle p-1 sm:flex">
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+            {tableView === "model" && (
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-text-muted whitespace-nowrap">OpenAI plan</span>
+                <select
+                  value={openaiSubscriptionTier}
+                  onChange={(event) => updateOpenaiSubscriptionTier(event.target.value)}
+                  disabled={tierSaving}
+                  title="Estimate from rolling 7-day tokens and OpenAI credit rates; your official usage page may differ"
+                  className="rounded-lg border border-border bg-surface px-3 py-1.5 text-sm font-medium text-text-main focus:outline-none focus:ring-2 focus:ring-primary/50"
+                >
+                  {OPENAI_SUBSCRIPTION_TIERS.map((tier) => (
+                    <option key={tier.value} value={tier.value}>{tier.label}</option>
+                  ))}
+                </select>
+                {tierError && <span className="text-xs text-error">{tierError}</span>}
+              </div>
+            )}
+            <div className="grid grid-cols-2 items-center gap-1 rounded-lg border border-border bg-bg-subtle p-1 sm:flex">
             <button
               onClick={() => setViewMode("costs")}
               className={`px-3 py-1 rounded-md text-sm font-medium transition-colors ${viewMode === "costs" ? "bg-primary text-white shadow-sm" : "text-text-muted hover:text-text hover:bg-bg-hover"}`}
@@ -509,6 +614,7 @@ export default function UsageStats({ period: periodProp, setPeriod: setPeriodPro
             >
               Tokens
             </button>
+            </div>
           </div>
         </div>
         {loading ? spinner : activeTableConfig && (
