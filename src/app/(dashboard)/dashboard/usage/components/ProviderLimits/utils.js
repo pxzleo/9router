@@ -464,6 +464,7 @@ export function parseQuotaData(provider, data) {
               total: quota.total || 0,
               remaining: quota.remaining,
               resetAt: quota.resetAt || null,
+              windowSeconds: quota.windowSeconds || null,
             });
           });
         }

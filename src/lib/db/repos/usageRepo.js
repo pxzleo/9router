@@ -3,6 +3,7 @@ import { getAdapter } from "../driver.js";
 import { parseJson, stringifyJson } from "../helpers/jsonCol.js";
 import { getMeta, setMeta } from "../helpers/metaStore.js";
 import { createHash } from "node:crypto";
+import { calculateOpenAICredits } from "../../../shared/utils/openaiSubscriptionUsage.js";
 
 function maskApiKey(key) {
   if (!key || typeof key !== "string") return null;
@@ -20,6 +21,37 @@ const PENDING_TIMEOUT_MS = 60 * 1000;
 const RING_CAP = 50;
 const CONN_CACHE_TTL_MS = 30 * 1000;
 const PERIOD_MS = { "24h": 86400000, "7d": 604800000, "30d": 2592000000, "60d": 5184000000 };
+
+function getPeriodCutoff(period) {
+  if (period === "today") {
+    const startOfDay = new Date();
+    startOfDay.setHours(0, 0, 0, 0);
+    return startOfDay.toISOString();
+  }
+  if (period === "24h") return new Date(Date.now() - PERIOD_MS["24h"]).toISOString();
+  const days = { "7d": 7, "30d": 30, "60d": 60 }[period];
+  if (!days) return new Date(0).toISOString();
+  const cutoff = new Date();
+  cutoff.setHours(0, 0, 0, 0);
+  cutoff.setDate(cutoff.getDate() - days + 1);
+  return cutoff.toISOString();
+}
+
+function getRowCredits(row) {
+  const tokens = parseJson(row.tokens, {}) || {};
+  return calculateOpenAICredits(row.model, {
+    promptTokens: tokens.prompt_tokens ?? tokens.input_tokens ?? row.promptTokens ?? 0,
+    completionTokens: tokens.completion_tokens ?? tokens.output_tokens ?? row.completionTokens ?? 0,
+    cachedTokens: tokens.cached_tokens ?? tokens.cache_read_input_tokens ?? 0,
+  });
+}
+
+function addConnectionCredits(entry, connectionId, credits) {
+  if (!entry || !connectionId || !Number.isFinite(credits) || credits <= 0) return;
+  entry.subscriptionCreditsByConnection ||= {};
+  entry.subscriptionCreditsByConnection[connectionId] =
+    (entry.subscriptionCreditsByConnection[connectionId] || 0) + credits;
+}
 
 // In-memory state shared across Next.js modules
 if (!global._pendingRequests) global._pendingRequests = { byModel: {}, byAccount: {} };
@@ -348,6 +380,24 @@ function loadDaysInRange(adapter, maxDays) {
   const cutoff = new Date(today.getFullYear(), today.getMonth(), today.getDate() - maxDays + 1);
   const cutoffKey = `${cutoff.getFullYear()}-${String(cutoff.getMonth() + 1).padStart(2, "0")}-${String(cutoff.getDate()).padStart(2, "0")}`;
   return adapter.all(`SELECT dateKey, data FROM usageDaily WHERE dateKey >= ?`, [cutoffKey]);
+}
+
+export async function getOpenAICreditsByConnection(connectionId, since = null) {
+  if (!connectionId) throw new TypeError("connectionId is required");
+  const db = await getAdapter();
+  const params = [connectionId];
+  let where = "provider = 'codex' AND connectionId = ?";
+  if (since) {
+    const sinceDate = new Date(since);
+    if (!Number.isFinite(sinceDate.getTime())) throw new TypeError("since must be a valid date");
+    where += " AND timestamp >= ?";
+    params.push(sinceDate.toISOString());
+  }
+  const rows = db.all(
+    `SELECT model, promptTokens, completionTokens, tokens FROM usageHistory WHERE ${where}`,
+    params,
+  );
+  return rows.reduce((total, row) => total + (getRowCredits(row) || 0), 0);
 }
 
 export async function getUsageStats(period = "all") {
@@ -688,6 +738,35 @@ export async function getUsageStats(period = "all") {
       epe.requests++; epe.promptTokens += promptTokens; epe.completionTokens += completionTokens; epe.cachedTokens += cachedTokens; epe.cost += entryCost;
       if (new Date(r.timestamp) > new Date(epe.lastUsed)) epe.lastUsed = r.timestamp;
     }
+  }
+
+  // Rebuild calibrated-credit attribution from raw history. Daily summaries do not
+  // retain the account dimension needed to apply a separate calibration per account.
+  const subscriptionRows = db.all(
+    `SELECT timestamp, provider, model, connectionId, apiKey, endpoint,
+            promptTokens, completionTokens, tokens
+     FROM usageHistory
+     WHERE provider = 'codex' AND timestamp >= ?`,
+    [getPeriodCutoff(period)],
+  );
+  for (const row of subscriptionRows) {
+    const credits = getRowCredits(row);
+    if (credits == null || !row.connectionId) continue;
+
+    const modelKey = `${row.model} (${row.provider})`;
+    addConnectionCredits(stats.byModel[modelKey], row.connectionId, credits);
+
+    const accountName = connectionMap[row.connectionId] || `Account ${row.connectionId.slice(0, 8)}...`;
+    const accountKey = `${row.model} (${row.provider} - ${accountName})`;
+    addConnectionCredits(stats.byAccount[accountKey], row.connectionId, credits);
+
+    const apiKeyId = getApiKeyStatsId(row.apiKey, apiKeyMap[row.apiKey]);
+    const apiKeyKey = `${apiKeyId}|${row.model}|${row.provider || "unknown"}`;
+    addConnectionCredits(stats.byApiKey[apiKeyKey], row.connectionId, credits);
+
+    const endpoint = row.endpoint || "Unknown";
+    const endpointKey = `${endpoint}|${row.model}|${row.provider || "unknown"}`;
+    addConnectionCredits(stats.byEndpoint[endpointKey], row.connectionId, credits);
   }
 
   stats.totalRequests = Object.values(stats.byProvider).reduce((sum, p) => sum + (p.requests || 0), 0);

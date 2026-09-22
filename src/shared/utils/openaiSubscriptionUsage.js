@@ -1,11 +1,3 @@
-// OpenAI publishes the 5x/20x plan multipliers, but not a fixed personal-plan
-// credit pool. These rolling-week budgets are estimates and the UI labels them as such.
-export const OPENAI_SUBSCRIPTION_TIERS = [
-  { value: "plus", label: "Plus", estimatedWeeklyCredits: 500 },
-  { value: "pro5x", label: "Pro 5x", estimatedWeeklyCredits: 2500 },
-  { value: "pro20x", label: "Pro 20x", estimatedWeeklyCredits: 10000 },
-];
-
 // Credits per one million tokens from OpenAI's current Codex rate card.
 const MODEL_CREDIT_RATES = {
   "gpt-6-astra": { input: 250, cachedInput: 25, output: 1250 },
@@ -23,11 +15,7 @@ function normalizeModel(model) {
   return normalized.replace(/-review$/, "");
 }
 
-export function getOpenAISubscriptionTier(value) {
-  return OPENAI_SUBSCRIPTION_TIERS.find((tier) => tier.value === value) || OPENAI_SUBSCRIPTION_TIERS[0];
-}
-
-export function calculateOpenAISubscriptionUsage(model, tokens, tierValue) {
+export function calculateOpenAICredits(model, tokens) {
   const rates = MODEL_CREDIT_RATES[normalizeModel(model)];
   if (!rates) return null;
 
@@ -35,27 +23,77 @@ export function calculateOpenAISubscriptionUsage(model, tokens, tierValue) {
   const cachedTokens = Math.min(promptTokens, Math.max(0, Number(tokens?.cachedTokens) || 0));
   const completionTokens = Math.max(0, Number(tokens?.completionTokens) || 0);
   const inputTokens = promptTokens - cachedTokens;
-  const credits = (
+  return (
     inputTokens * rates.input +
     cachedTokens * rates.cachedInput +
     completionTokens * rates.output
   ) / 1_000_000;
-  const tier = getOpenAISubscriptionTier(tierValue);
+}
 
+export function calculateCalibrationSample(start, end) {
+  const startPercent = Number(start?.usedPercent);
+  const endPercent = Number(end?.usedPercent);
+  const startCredits = Number(start?.localCredits);
+  const endCredits = Number(end?.localCredits);
+  const percentDelta = endPercent - startPercent;
+  const creditsDelta = endCredits - startCredits;
+
+  if (!Number.isFinite(percentDelta) || percentDelta < 5) {
+    throw new RangeError("官方周用量至少增长 5 个百分点后才能完成校准");
+  }
+  if (!Number.isFinite(creditsDelta) || creditsDelta <= 0) {
+    throw new RangeError("校准期间没有记录到可计费的 OpenAI Token");
+  }
+
+  const weeklyCredits = creditsDelta / (percentDelta / 100);
+  const minPercentDelta = Math.max(0.01, percentDelta - 1);
+  const maxPercentDelta = percentDelta + 1;
   return {
-    credits,
-    percent: tier.estimatedWeeklyCredits > 0 ? credits / tier.estimatedWeeklyCredits * 100 : 0,
+    percentDelta,
+    creditsDelta,
+    weeklyCredits,
+    minWeeklyCredits: creditsDelta / (maxPercentDelta / 100),
+    maxWeeklyCredits: creditsDelta / (minPercentDelta / 100),
   };
 }
 
-export function addOpenAISubscriptionUsage(dataMap, tierValue) {
+export function getCalibratedWeeklyCredits(calibration) {
+  const values = (calibration?.samples || [])
+    .map((sample) => Number(sample.weeklyCredits))
+    .filter((value) => Number.isFinite(value) && value > 0)
+    .sort((a, b) => a - b);
+  if (!values.length) return null;
+  const middle = Math.floor(values.length / 2);
+  return values.length % 2 ? values[middle] : (values[middle - 1] + values[middle]) / 2;
+}
+
+export function addOpenAISubscriptionUsage(dataMap, calibrations = {}) {
   return Object.fromEntries(Object.entries(dataMap || {}).map(([key, data]) => {
-    if (!tierValue || data.providerId !== "codex") {
+    if (data.providerId !== "codex") {
       return [key, { ...data, subscriptionPercent: null }];
     }
-    const usage = calculateOpenAISubscriptionUsage(data.rawModel, data, tierValue);
-    return [key, usage
-      ? { ...data, subscriptionPercent: usage.percent, subscriptionCredits: usage.credits }
+
+    const creditsByConnection = data.subscriptionCreditsByConnection || {};
+    const entries = Object.entries(creditsByConnection).filter(([, credits]) => Number(credits) > 0);
+    if (!entries.length && data.connectionId) {
+      const credits = calculateOpenAICredits(data.rawModel, data);
+      if (credits != null && credits > 0) entries.push([data.connectionId, credits]);
+    }
+
+    let percent = 0;
+    let totalCredits = 0;
+    for (const [connectionId, rawCredits] of entries) {
+      const credits = Number(rawCredits);
+      const weeklyCredits = getCalibratedWeeklyCredits(calibrations[connectionId]);
+      if (!weeklyCredits) {
+        return [key, { ...data, subscriptionPercent: null, subscriptionCredits: totalCredits + credits }];
+      }
+      totalCredits += credits;
+      percent += credits / weeklyCredits * 100;
+    }
+
+    return [key, entries.length
+      ? { ...data, subscriptionPercent: percent, subscriptionCredits: totalCredits }
       : { ...data, subscriptionPercent: null }];
   }));
 }

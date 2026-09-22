@@ -3,10 +3,7 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
 import { FREE_PROVIDERS, AI_PROVIDERS } from "@/shared/constants/providers";
-import {
-  OPENAI_SUBSCRIPTION_TIERS,
-  addOpenAISubscriptionUsage,
-} from "@/shared/utils/openaiSubscriptionUsage";
+import { addOpenAISubscriptionUsage } from "@/shared/utils/openaiSubscriptionUsage";
 
 // Keep providers without serviceKinds (default LLM) or with "llm" in serviceKinds
 function isLLMProvider(id) {
@@ -217,6 +214,101 @@ function formatSubscriptionPercent(value) {
   return `${value.toFixed(2)}%`;
 }
 
+function formatCalibrationResetAt(value) {
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return "—";
+  return date.toLocaleString("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
+}
+
+function SubscriptionCalibration({ data, loading, busyId, error, onAction, onRefresh }) {
+  const accounts = data?.accounts || [];
+  return (
+    <Card padding="sm" className="flex flex-col gap-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <div className="text-sm font-semibold text-text-main">OpenAI 周用量校准</div>
+          <div className="text-xs text-text-muted">校准期间该账号的所有请求必须经过 9router；官方用量至少增长 5 个百分点后完成。</div>
+        </div>
+        <button
+          type="button"
+          onClick={onRefresh}
+          disabled={loading}
+          className="rounded border border-border px-2.5 py-1 text-xs text-text-muted hover:text-text-main disabled:opacity-50"
+        >
+          {loading ? "刷新中…" : "刷新官方用量"}
+        </button>
+      </div>
+      {error && <div className="text-xs text-error">{error}</div>}
+      {!loading && accounts.length === 0 && <div className="text-xs text-text-muted">没有可用的 OpenAI Codex 账号。</div>}
+      {accounts.map((account) => {
+        const baseline = account.calibration?.baseline;
+        const delta = baseline ? account.officialUsedPercent - baseline.usedPercent : 0;
+        const busy = busyId === account.connectionId;
+        return (
+          <div key={account.connectionId} className="rounded-lg border border-border bg-bg-subtle px-3 py-2">
+            <div className="flex flex-col gap-2 lg:flex-row lg:items-center lg:justify-between">
+              <div className="min-w-0">
+                <div className="truncate text-sm font-medium text-text-main">{account.accountName}</div>
+                {account.error ? (
+                  <div className="text-xs text-error">{account.error}</div>
+                ) : (
+                  <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-xs text-text-muted">
+                    <span>官方已用 <strong className="text-text-main">{account.officialUsedPercent}%</strong></span>
+                    <span>剩余 <strong className="text-text-main">{account.officialRemainingPercent}%</strong></span>
+                    <span>重置 {formatCalibrationResetAt(account.resetAt)}</span>
+                    <span>本周记录 {account.localWeekCredits.toFixed(2)} 点</span>
+                    {account.effectiveWeeklyCredits && <span>校准周额度 {Math.round(account.effectiveWeeklyCredits).toLocaleString()} 点</span>}
+                    {typeof account.trackedPercent === "number" && <span>9router 已归属 {formatSubscriptionPercent(account.trackedPercent)}</span>}
+                    {typeof account.unassignedPercent === "number" && <span>未归属差额 {account.unassignedPercent.toFixed(2)}%</span>}
+                  </div>
+                )}
+                {baseline && !account.error && (
+                  <div className="mt-1 text-xs text-primary">
+                    校准中：官方 {baseline.usedPercent}% → {account.officialUsedPercent}%（已增长 {delta.toFixed(0)}%，还需 {Math.max(0, 5 - delta).toFixed(0)}%）
+                  </div>
+                )}
+              </div>
+              {!account.error && (
+                <div className="flex shrink-0 gap-2">
+                  {baseline ? (
+                    <>
+                      <button
+                        type="button"
+                        onClick={() => onAction(account.connectionId, "complete")}
+                        disabled={busy || delta < 5}
+                        className="rounded bg-primary px-3 py-1.5 text-xs font-medium text-white disabled:opacity-50"
+                      >完成校准</button>
+                      <button
+                        type="button"
+                        onClick={() => onAction(account.connectionId, "cancel")}
+                        disabled={busy}
+                        className="rounded border border-border px-3 py-1.5 text-xs text-text-muted disabled:opacity-50"
+                      >取消</button>
+                    </>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => onAction(account.connectionId, "start")}
+                      disabled={busy}
+                      className="rounded bg-primary px-3 py-1.5 text-xs font-medium text-white disabled:opacity-50"
+                    >{account.effectiveWeeklyCredits ? "新增校准样本" : "开始校准"}</button>
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+        );
+      })}
+    </Card>
+  );
+}
+
 export default function UsageStats({ period: periodProp, setPeriod: setPeriodProp, hidePeriodSelector = false } = {}) {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -231,48 +323,72 @@ export default function UsageStats({ period: periodProp, setPeriod: setPeriodPro
   const [viewMode, setViewMode] = useState("costs");
   const [providers, setProviders] = useState([]);
   const [periodLocal, setPeriodLocal] = useState("today");
-  const [openaiSubscriptionTier, setOpenaiSubscriptionTier] = useState(null);
-  const [tierSaving, setTierSaving] = useState(false);
-  const [tierError, setTierError] = useState("");
+  const [calibrationData, setCalibrationData] = useState(null);
+  const [calibrationLoading, setCalibrationLoading] = useState(true);
+  const [calibrationBusyId, setCalibrationBusyId] = useState("");
+  const [calibrationError, setCalibrationError] = useState("");
   const isInitialLoad = useRef(true);
   const hasLoadedStats = useRef(false);
   const period = periodProp ?? periodLocal;
   const setPeriod = setPeriodProp ?? setPeriodLocal;
 
-  useEffect(() => {
-    fetch("/api/settings")
-      .then((response) => {
-        if (!response.ok) throw new Error(`Settings request failed (${response.status})`);
-        return response.json();
-      })
-      .then((settings) => setOpenaiSubscriptionTier(settings.openaiSubscriptionTier || "plus"))
-      .catch((error) => {
-        console.error("[UsageStats] Failed to load OpenAI subscription tier:", error);
-        setOpenaiSubscriptionTier("plus");
-        setTierError("Failed to load subscription tier.");
-      });
+  const refreshCalibration = useCallback(async () => {
+    try {
+      const response = await fetch("/api/usage/openai-calibration", { cache: "no-store" });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || `校准数据请求失败 (${response.status})`);
+      setCalibrationData(result);
+    } catch (error) {
+      console.error("[UsageStats] Failed to load OpenAI calibration:", error);
+      setCalibrationError(error.message || "读取 OpenAI 校准数据失败");
+    } finally {
+      setCalibrationLoading(false);
+    }
   }, []);
 
-  const updateOpenaiSubscriptionTier = useCallback(async (nextTier) => {
-    const previousTier = openaiSubscriptionTier;
-    setOpenaiSubscriptionTier(nextTier);
-    setTierSaving(true);
-    setTierError("");
-    try {
-      const response = await fetch("/api/settings", {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ openaiSubscriptionTier: nextTier }),
+  useEffect(() => {
+    let active = true;
+    fetch("/api/usage/openai-calibration", { cache: "no-store" })
+      .then(async (response) => {
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || `校准数据请求失败 (${response.status})`);
+        if (active) setCalibrationData(result);
+      })
+      .catch((error) => {
+        console.error("[UsageStats] Failed to load OpenAI calibration:", error);
+        if (active) setCalibrationError(error.message || "读取 OpenAI 校准数据失败");
+      })
+      .finally(() => {
+        if (active) setCalibrationLoading(false);
       });
-      if (!response.ok) throw new Error(`Settings update failed (${response.status})`);
+    return () => { active = false; };
+  }, []);
+
+  const requestCalibrationRefresh = useCallback(() => {
+    setCalibrationLoading(true);
+    setCalibrationError("");
+    refreshCalibration();
+  }, [refreshCalibration]);
+
+  const runCalibrationAction = useCallback(async (connectionId, action) => {
+    setCalibrationBusyId(connectionId);
+    setCalibrationError("");
+    try {
+      const response = await fetch("/api/usage/openai-calibration", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ connectionId, action }),
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || `校准操作失败 (${response.status})`);
+      setCalibrationData(result);
     } catch (error) {
-      console.error("[UsageStats] Failed to save OpenAI subscription tier:", error);
-      setOpenaiSubscriptionTier(previousTier);
-      setTierError("Failed to save subscription tier.");
+      console.error("[UsageStats] OpenAI calibration action failed:", error);
+      setCalibrationError(error.message || "OpenAI 校准操作失败");
     } finally {
-      setTierSaving(false);
+      setCalibrationBusyId("");
     }
-  }, [openaiSubscriptionTier]);
+  }, []);
 
   // Fetch connected providers once, deduplicate by provider type
   // Always include noAuth free providers (e.g. opencode) regardless of connections
@@ -381,7 +497,7 @@ export default function UsageStats({ period: periodProp, setPeriod: setPeriodPro
         const pendingMap = stats.pending?.byModel || {};
         const modelsWithSubscription = addOpenAISubscriptionUsage(
           stats.byModel,
-          openaiSubscriptionTier,
+          calibrationData?.calibrations,
         );
         return {
           columns: MODEL_COLUMNS,
@@ -418,7 +534,7 @@ export default function UsageStats({ period: periodProp, setPeriod: setPeriodPro
             }
           });
         }
-        const accountsWithSubscription = addOpenAISubscriptionUsage(stats.byAccount, openaiSubscriptionTier);
+        const accountsWithSubscription = addOpenAISubscriptionUsage(stats.byAccount, calibrationData?.calibrations);
         return {
           columns: ACCOUNT_COLUMNS,
           groupedData: groupDataByKey(sortData(accountsWithSubscription, pendingMap, sortBy, sortOrder), "accountName"),
@@ -446,7 +562,7 @@ export default function UsageStats({ period: periodProp, setPeriod: setPeriodPro
         };
       }
       case "apiKey": {
-        const apiKeysWithSubscription = addOpenAISubscriptionUsage(stats.byApiKey, openaiSubscriptionTier);
+        const apiKeysWithSubscription = addOpenAISubscriptionUsage(stats.byApiKey, calibrationData?.calibrations);
         return {
           columns: API_KEY_COLUMNS,
           groupedData: groupDataByKey(sortData(apiKeysWithSubscription, {}, sortBy, sortOrder), "keyName"),
@@ -475,7 +591,7 @@ export default function UsageStats({ period: periodProp, setPeriod: setPeriodPro
       }
       case "endpoint":
       default: {
-        const endpointsWithSubscription = addOpenAISubscriptionUsage(stats.byEndpoint, openaiSubscriptionTier);
+        const endpointsWithSubscription = addOpenAISubscriptionUsage(stats.byEndpoint, calibrationData?.calibrations);
         return {
           columns: ENDPOINT_COLUMNS,
           groupedData: groupDataByKey(sortData(endpointsWithSubscription, {}, sortBy, sortOrder), "endpoint"),
@@ -503,7 +619,7 @@ export default function UsageStats({ period: periodProp, setPeriod: setPeriodPro
         };
       }
     }
-  }, [stats, tableView, sortBy, sortOrder, openaiSubscriptionTier]);
+  }, [stats, tableView, sortBy, sortOrder, calibrationData]);
 
   if (!stats && !loading) return <div className="text-text-muted">Failed to load usage statistics.</div>;
 
@@ -555,6 +671,15 @@ export default function UsageStats({ period: periodProp, setPeriod: setPeriodPro
       {/* Token / Cost chart - sync period */}
       {loading ? spinner : <UsageChart period={period} />}
 
+      <SubscriptionCalibration
+        data={calibrationData}
+        loading={calibrationLoading}
+        busyId={calibrationBusyId}
+        error={calibrationError}
+        onAction={runCalibrationAction}
+        onRefresh={requestCalibrationRefresh}
+      />
+
       {/* Table with dropdown selector */}
       <div className="flex flex-col gap-3">
         <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
@@ -569,23 +694,6 @@ export default function UsageStats({ period: periodProp, setPeriod: setPeriodPro
             ))}
           </select>
           <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
-            {tableView === "model" && (
-              <div className="flex items-center gap-2">
-                <span className="text-xs text-text-muted whitespace-nowrap">OpenAI plan</span>
-                <select
-                  value={openaiSubscriptionTier || "plus"}
-                  onChange={(event) => updateOpenaiSubscriptionTier(event.target.value)}
-                  disabled={tierSaving}
-                  title="Estimate from the selected period's tokens and OpenAI credit rates; your official usage page may differ"
-                  className="rounded-lg border border-border bg-surface px-3 py-1.5 text-sm font-medium text-text-main focus:outline-none focus:ring-2 focus:ring-primary/50"
-                >
-                  {OPENAI_SUBSCRIPTION_TIERS.map((tier) => (
-                    <option key={tier.value} value={tier.value}>{tier.label}</option>
-                  ))}
-                </select>
-                {tierError && <span className="text-xs text-error">{tierError}</span>}
-              </div>
-            )}
             <div className="grid grid-cols-2 items-center gap-1 rounded-lg border border-border bg-bg-subtle p-1 sm:flex">
             <button
               onClick={() => setViewMode("costs")}

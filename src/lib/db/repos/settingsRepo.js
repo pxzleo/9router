@@ -45,6 +45,7 @@ const DEFAULT_SETTINGS = {
   observabilityFlushIntervalMs: 5000,
   observabilityMaxJsonSize: 5,
   openaiSubscriptionTier: "plus",
+  openaiUsageCalibrations: {},
   outboundProxyEnabled: false,
   outboundProxyUrl: "",
   outboundNoProxy: "",

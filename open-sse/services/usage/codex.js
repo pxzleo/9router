@@ -39,6 +39,16 @@ function getCodexRateLimitBody(snapshot) {
     : snapshot;
 }
 
+export function getCodexWindowKind(window, fallback) {
+  const seconds = toFiniteNumber(
+    window?.limit_window_seconds ?? window?.window_seconds ?? window?.windowSeconds,
+    0,
+  );
+  if (seconds >= 6 * 24 * 60 * 60) return "weekly";
+  if (seconds > 0 && seconds <= 6 * 60 * 60) return "session";
+  return fallback;
+}
+
 function formatCodexWindow(window) {
   const used = Math.max(0, Math.min(100, toFiniteNumber(window?.used_percent ?? window?.percent_used, 0)));
   return {
@@ -46,6 +56,10 @@ function formatCodexWindow(window) {
     total: 100,
     remaining: Math.max(0, 100 - used),
     resetAt: parseResetTime(window?.reset_at ?? window?.resets_at ?? window?.resetAt ?? null),
+    windowSeconds: toFiniteNumber(
+      window?.limit_window_seconds ?? window?.window_seconds ?? window?.windowSeconds,
+      0,
+    ) || null,
     unlimited: false,
   };
 }
@@ -59,11 +73,13 @@ function appendCodexQuotaWindows(quotas, prefix, snapshot) {
   let added = false;
 
   if (primary) {
-    quotas[prefix ? `${prefix}_session` : "session"] = formatCodexWindow(primary);
+    const kind = getCodexWindowKind(primary, "session");
+    quotas[prefix ? `${prefix}_${kind}` : kind] = formatCodexWindow(primary);
     added = true;
   }
   if (secondary) {
-    quotas[prefix ? `${prefix}_weekly` : "weekly"] = formatCodexWindow(secondary);
+    const kind = getCodexWindowKind(secondary, "weekly");
+    quotas[prefix ? `${prefix}_${kind}` : kind] = formatCodexWindow(secondary);
     added = true;
   }
 
@@ -104,14 +120,17 @@ function getCodexSparkRateLimit(data) {
   }) || null;
 }
 
-export async function getCodexUsage(accessToken, proxyOptions = null) {
+export async function getCodexUsage(accessToken, proxyOptions = null, providerSpecificData = null) {
   try {
+    const headers = {
+      "Authorization": `Bearer ${accessToken}`,
+      "Accept": "application/json",
+    };
+    const accountId = getCodexAccountId(providerSpecificData);
+    if (accountId) headers["ChatGPT-Account-ID"] = accountId;
     const response = await proxyAwareFetch(CODEX_CONFIG.usageUrl, {
       method: "GET",
-      headers: {
-        "Authorization": `Bearer ${accessToken}`,
-        "Accept": "application/json",
-      },
+      headers,
     }, proxyOptions);
 
     if (!response.ok) {
