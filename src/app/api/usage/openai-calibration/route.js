@@ -116,26 +116,42 @@ export async function POST(request) {
       return NextResponse.json(await getResponsePayload());
     }
 
-    const usage = await getCodexUsage(
-      connection.accessToken,
-      connection.proxyOptions || null,
-      connection.providerSpecificData || null,
-    );
-    const weekly = getWeeklyQuota(usage);
-    const localCredits = await getOpenAICreditsByConnection(connectionId);
-    const snapshot = {
-      usedPercent: Number(weekly.used),
-      localCredits,
-      resetAt: weekly.resetAt,
-      capturedAt: new Date().toISOString(),
-    };
-
     if (action === "start") {
+      const displayed = body?.snapshot;
+      const usedPercent = Number(displayed?.usedPercent);
+      const resetAt = new Date(displayed?.resetAt || "");
+      if (!Number.isFinite(usedPercent) || usedPercent < 0 || usedPercent > 100 || !Number.isFinite(resetAt.getTime())) {
+        return NextResponse.json({ error: "页面上的 OpenAI 周用量快照无效，请先刷新官方用量" }, { status: 400 });
+      }
+      const localCredits = await getOpenAICreditsByConnection(connectionId);
+      const snapshot = {
+        usedPercent,
+        localCredits,
+        resetAt: resetAt.toISOString(),
+        capturedAt: new Date().toISOString(),
+      };
       calibrations[connectionId] = { ...current, baseline: snapshot };
-    } else if (action === "complete") {
+      await updateSettings({ openaiUsageCalibrations: calibrations });
+      return NextResponse.json({ calibrations });
+    }
+
+    if (action === "complete") {
       if (!current.baseline) {
         return NextResponse.json({ error: "请先开始一次校准" }, { status: 409 });
       }
+      const usage = await getCodexUsage(
+        connection.accessToken,
+        connection.proxyOptions || null,
+        connection.providerSpecificData || null,
+      );
+      const weekly = getWeeklyQuota(usage);
+      const localCredits = await getOpenAICreditsByConnection(connectionId);
+      const snapshot = {
+        usedPercent: Number(weekly.used),
+        localCredits,
+        resetAt: weekly.resetAt,
+        capturedAt: new Date().toISOString(),
+      };
       if (current.baseline.resetAt !== snapshot.resetAt) {
         return NextResponse.json({ error: "OpenAI 周窗口已经重置，请重新开始校准" }, { status: 409 });
       }
@@ -149,12 +165,11 @@ export async function POST(request) {
         }].slice(-20),
         baseline: null,
       };
-    } else {
-      return NextResponse.json({ error: "不支持的校准操作" }, { status: 400 });
+      await updateSettings({ openaiUsageCalibrations: calibrations });
+      return NextResponse.json(await getResponsePayload());
     }
 
-    await updateSettings({ openaiUsageCalibrations: calibrations });
-    return NextResponse.json(await getResponsePayload());
+    return NextResponse.json({ error: "不支持的校准操作" }, { status: 400 });
   } catch (error) {
     const status = error instanceof RangeError ? 409 : 500;
     return NextResponse.json({ error: error.message }, { status });

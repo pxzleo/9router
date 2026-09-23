@@ -292,12 +292,15 @@ function SubscriptionCalibration({ data, loading, busyId, error, onAction, onRef
                       >取消</button>
                     </>
                   ) : (
-                    <button
-                      type="button"
-                      onClick={() => onAction(account.connectionId, "start")}
-                      disabled={busy}
-                      className="rounded bg-primary px-3 py-1.5 text-xs font-medium text-white disabled:opacity-50"
-                    >{account.effectiveWeeklyCredits ? "新增校准样本" : "开始校准"}</button>
+                      <button
+                        type="button"
+                        onClick={() => onAction(account.connectionId, "start", {
+                          usedPercent: account.officialUsedPercent,
+                          resetAt: account.resetAt,
+                        })}
+                        disabled={busy}
+                        className="rounded bg-primary px-3 py-1.5 text-xs font-medium text-white disabled:opacity-50"
+                      >{busy ? "处理中…" : (account.effectiveWeeklyCredits ? "新增校准样本" : "开始校准")}</button>
                   )}
                 </div>
               )}
@@ -370,18 +373,28 @@ export default function UsageStats({ period: periodProp, setPeriod: setPeriodPro
     refreshCalibration();
   }, [refreshCalibration]);
 
-  const runCalibrationAction = useCallback(async (connectionId, action) => {
+  const runCalibrationAction = useCallback(async (connectionId, action, snapshot = null) => {
     setCalibrationBusyId(connectionId);
     setCalibrationError("");
     try {
       const response = await fetch("/api/usage/openai-calibration", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ connectionId, action }),
+        body: JSON.stringify({ connectionId, action, snapshot }),
       });
       const result = await response.json();
       if (!response.ok) throw new Error(result.error || `校准操作失败 (${response.status})`);
-      setCalibrationData(result);
+      setCalibrationData((previous) => {
+        if (result.accounts) return result;
+        const calibrations = result.calibrations || previous?.calibrations || {};
+        return {
+          ...previous,
+          calibrations,
+          accounts: (previous?.accounts || []).map((account) => account.connectionId === connectionId
+            ? { ...account, calibration: calibrations[connectionId] || { samples: [] } }
+            : account),
+        };
+      });
     } catch (error) {
       console.error("[UsageStats] OpenAI calibration action failed:", error);
       setCalibrationError(error.message || "OpenAI 校准操作失败");
